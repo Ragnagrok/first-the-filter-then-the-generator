@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Checks everything the README claims:
 #   1. the tests pass: the core's property, and the two-branch race in the shell;
-#   2. the gate accepts the core as it is, and rejects it with a dependency added
-#      or with #![no_std] removed;
+#   2. the gate accepts the core as it is, and rejects it with a dependency added,
+#      with #![no_std] removed, or with gate/extern_std.rs (`extern crate std;`) added;
 #   3. every file in rejected/ fails to compile inside the core, with the error
-#      announced on its "// expects:" line;
-#   4. the property has teeth: a mutant core that lets a redeemed code be sold
+#      announced on its "// expects:" line, while gate/extern_std.rs compiles;
+#   4. step's match has no catch-all: a fifth state without its cases doesn't compile;
+#   5. the property has teeth: a mutant core that lets a redeemed code be sold
 #      again is caught, and shrunk to a short sequence of events.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -39,6 +40,15 @@ else
   echo "ok   the gate rejects removing no_std: $out"
 fi
 
+copy
+cp gate/extern_std.rs "$work/ws/core/src/escape.rs"
+echo 'mod escape;' >> "$work/ws/core/src/lib.rs"
+if out=$("$work/ws/core-gate.sh" "$work/ws" 2>&1); then
+  echo "FAIL the gate accepted a core with extern crate std"; failures=1
+else
+  echo "ok   the gate rejects bringing std back: $out"
+fi
+
 # The core alone, outside the workspace and without its dev-dependencies:
 # exactly what the core's own code can reach.
 probe() {
@@ -60,6 +70,25 @@ for f in rejected/*.rs; do
   fi
 done
 
+# Why the gate checks the sources too: no_std plus forbid(unsafe_code) let this one through.
+if probe gate/extern_std.rs >/dev/null; then
+  echo "ok   gate/extern_std.rs compiles despite no_std and forbid(unsafe_code): only the gate stops it"
+else
+  echo "FAIL gate/extern_std.rs should compile, so that the gate is what stops it"; failures=1
+fi
+
+# A fifth state, with no case of its own in step: the match is exhaustive, so it doesn't compile.
+probe /dev/null >/dev/null || true
+sed -i 's/^pub enum Code { Available, Sold, Redeemed, Expired }$/pub enum Code { Available, Sold, Redeemed, Expired, Frozen }/' "$work/core/src/lib.rs"
+grep -q 'Frozen' "$work/core/src/lib.rs" || { echo "FAIL the fifth state wasn't added"; exit 1; }
+if output=$(cd "$work/core" && CARGO_TARGET_DIR="$work/target" cargo build --offline 2>&1); then
+  echo "FAIL a fifth state compiled without its cases in step"; failures=1
+elif grep -qF 'pattern `(Code::Frozen, _)` not covered' <<<"$output"; then
+  echo "ok   a fifth state doesn't compile until step says what happens with it: (Code::Frozen, _) not covered"
+else
+  echo "FAIL a fifth state doesn't compile, but not for the expected reason:"; echo "$output"; failures=1
+fi
+
 # Why no_std matters: with std, reading a file needs no dependency at all.
 probe rejected/files.rs >/dev/null || true
 sed -i '/^#!\[no_std\]$/d' "$work/core/src/lib.rs"
@@ -71,7 +100,7 @@ fi
 
 # The mutant: a redeemed code can be sold again, and so redeemed again.
 copy
-sed -i 's|^        (c, e) => (c, vec!\[Command::Reject(e)\]),|        (Redeemed, Event::Sale) => (Sold, vec![Command::Notify(Sold)]),\n&|' "$work/ws/core/src/lib.rs"
+sed -i 's|^        (Available, Event::Redemption)|        (Redeemed, Event::Sale) => (Sold, vec![Command::Notify(Sold)]),\n&|' "$work/ws/core/src/lib.rs"
 grep -q '(Redeemed, Event::Sale)' "$work/ws/core/src/lib.rs" || { echo "FAIL the mutant wasn't applied"; exit 1; }
 if out=$(cd "$work/ws" && CARGO_TARGET_DIR="$work/target-ws" cargo test -p giftcard-core 2>&1); then
   echo "FAIL the property didn't catch the mutant"; failures=1

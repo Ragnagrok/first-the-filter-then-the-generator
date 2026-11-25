@@ -17,10 +17,11 @@ fn step(code: Code, event: Event) -> (Code, Vec<Command>)
 
 | File | What it shows |
 |---|---|
-| `core/src/lib.rs` | The core: the article's `step`. No dependencies, `#![no_std]`, `#![forbid(unsafe_code)]`. |
+| `core/src/lib.rs` | The core: the article's `step`, with every rejection spelled out (no catch-all, so a new state doesn't compile until `step` covers it). No dependencies, `#![no_std]`, `#![forbid(unsafe_code)]`. |
 | `core/tests/properties.rs` | The article's property with `proptest`: whatever the sequence of events, a code is redeemed at most once. |
-| `core-gate.sh` | The gate for CI: fails if the core declares a dependency or loses `no_std` / `forbid(unsafe_code)`. |
+| `core-gate.sh` | The gate for CI: fails if the core declares a dependency, loses `no_std` / `forbid(unsafe_code)`, or links `std` back in by hand. |
 | `rejected/*.rs` | Code that tries to reach the world from the core, each with the compiler error it expects on its `// expects:` line. |
+| `gate/extern_std.rs` | Code that reaches the world from the core and compiles anyway, so only the gate stops it. |
 | `shell/src/lib.rs` | The shell: reads a code from SQLite, asks the core, writes the decision and hands over the gift. |
 | `shell/tests/race.rs` | Two branches redeeming the same code at the same time, step by step. |
 | `check.sh` | Checks all of the above, plus that the property catches a broken core. |
@@ -49,7 +50,14 @@ dependencies can still read files, open sockets and look at the clock. `check.sh
 remove `#![no_std]` and `files.rs` compiles. What closes the door is the combination: no
 dependencies, no `std` (only `core` and `alloc`), and no `unsafe`.
 
-And so that nobody (or no agent) quietly undoes it, `core-gate.sh` checks the three things on
+A second caveat, corrected on 2026-11-25: **`#![no_std]` doesn't forbid `std`, it only stops
+linking it implicitly.** `gate/extern_std.rs` writes `extern crate std;` and reads a file, and it
+compiles inside the core, `no_std` and `forbid(unsafe_code)` notwithstanding. So the gate also
+reads the core's sources: `extern` may appear only as `extern crate alloc;`, and `include!` or
+`#[path]`, which would pull in code from files the gate doesn't read, not at all. That's a text
+check, not the compiler, so this door is closed by CI rather than by the language.
+
+And so that nobody (or no agent) quietly undoes it, `core-gate.sh` checks all of that on
 every change. It's a short script over `cargo metadata`, not
 [cargo-deny](https://github.com/EmbarkStudios/cargo-deny): cargo-deny works with lists of crates to
 ban or allow, and the rule here isn't "not these crates" but "nothing at all", which the script
@@ -93,10 +101,13 @@ ok   cargo test: redeemed_at_most_once holds; naive write redeems twice, conditi
 ok   the gate accepts the core as it is
 ok   the gate rejects a dependency: gate: giftcard-core must not depend on anything, found: rusqlite
 ok   the gate rejects removing no_std: gate: core/src/lib.rs lost #![no_std]
+ok   the gate rejects bringing std back: gate: core/src may bring in no crate but alloc and no other file, found core/src/escape.rs:4: extern crate std;
 ok   rejected/clock.rs doesn't compile: unlinked crate `std`
 ok   rejected/database.rs doesn't compile: unlinked crate `rusqlite`
 ok   rejected/ffi.rs doesn't compile: usage of an `unsafe extern` block
 ok   rejected/files.rs doesn't compile: unlinked crate `std`
+ok   gate/extern_std.rs compiles despite no_std and forbid(unsafe_code): only the gate stops it
+ok   a fifth state doesn't compile until step says what happens with it: (Code::Frozen, _) not covered
 ok   without #![no_std], rejected/files.rs compiles: an empty dependency list alone doesn't stop file I/O
 ok   the property catches the mutant; minimal failing input: events = [ Sale, Redemption, Sale, Redemption]
 ```

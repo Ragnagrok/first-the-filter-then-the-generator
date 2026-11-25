@@ -3,6 +3,7 @@
 //! The empty dependency list in Cargo.toml isn't enough on its own: the standard
 //! library has `std::fs`, `std::net` and `std::time`. So the core is also `no_std`
 //! (only `core` and `alloc`), and `unsafe` is forbidden, which rules out calling C.
+//! Neither attribute stops the core from linking std again by hand, so core-gate.sh checks that.
 #![no_std]
 #![forbid(unsafe_code)]
 
@@ -27,6 +28,9 @@ pub fn step(code: Code, event: Event) -> (Code, Vec<Command>) {
         (Available, Event::Sale) => (Sold, vec![Command::Notify(Sold)]),
         (Sold, Event::Redemption) => (Redeemed, vec![Command::Notify(Redeemed)]),
         (Available | Sold, Event::Expiry) => (Expired, vec![]),
-        (c, e) => (c, vec![Command::Reject(e)]),
+        // Every rejection spelled out, no catch-all: a new state doesn't compile until it's here.
+        (Available, Event::Redemption) | (Sold, Event::Sale) | (Redeemed | Expired, _) => {
+            (code, vec![Command::Reject(event)])
+        }
     }
 }
